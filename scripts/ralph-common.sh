@@ -211,6 +211,20 @@ get_health_emoji() {
   fi
 }
 
+# Submodule-safe checkpoint commit.
+# Stages all changes while skipping submodule recursion and tolerating
+# individual file errors (e.g. broken submodule metadata).
+checkpoint_commit_if_needed() {
+  local workspace="${1:-.}"
+  local msg="$2"
+  if [[ -z "$(git -C "$workspace" status --porcelain --ignore-submodules=all 2>/dev/null)" ]]; then
+    return 0
+  fi
+  echo "📦 Committing uncommitted changes..."
+  git -C "$workspace" -c submodule.recurse=false add --all --ignore-errors 2>/dev/null || true
+  git -C "$workspace" commit -m "$msg" 2>/dev/null || true
+}
+
 # =============================================================================
 # LOGGING
 # =============================================================================
@@ -507,10 +521,12 @@ You are already in a git repository. Work HERE, not in a subdirectory:
 Ralph's strength is state-in-git, not LLM memory. Commit early and often:
 
 1. After completing each criterion, commit your changes:
-   \`git add -A && git commit -m 'ralph: implement state tracker'\`
-   \`git add -A && git commit -m 'ralph: fix async race condition'\`
-   \`git add -A && git commit -m 'ralph: add CLI adapter with commander'\`
+   \`git add . && git commit -m 'ralph: implement state tracker'\`
+   \`git add . && git commit -m 'ralph: fix async race condition'\`
+   \`git add . && git commit -m 'ralph: add CLI adapter with commander'\`
    Always describe what you actually did - never use placeholders like '<description>'
+   **Warning**: If the repo has git submodules, avoid \`git add -A\` — it can fail on
+   incomplete submodule metadata. Use \`git add .\` instead (stages the current directory only).
 2. After any significant code change (even partial): commit with descriptive message
 3. Before any risky refactor: commit current state as checkpoint
 4. Push after every 2-3 commits: \`git push\`
@@ -774,19 +790,14 @@ run_ralph_loop() {
   local workspace="$1"
   local script_dir="${2:-$(dirname "${BASH_SOURCE[0]}")}"
   
-  # Commit any uncommitted work first
-  cd "$workspace"
-  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    echo "📦 Committing uncommitted changes..."
-    git add -A
-    git commit -m "ralph: initial commit before loop" || true
-  fi
-  
-  # Create branch if requested
+  # Create branch if requested (before checkpoint so commit lands on correct branch)
   if [[ -n "$USE_BRANCH" ]]; then
     echo "🌿 Creating branch: $USE_BRANCH"
-    git checkout -b "$USE_BRANCH" 2>/dev/null || git checkout "$USE_BRANCH"
+    git -C "$workspace" checkout -b "$USE_BRANCH" 2>/dev/null || git -C "$workspace" checkout "$USE_BRANCH"
   fi
+
+  # Commit any uncommitted work (submodule-safe)
+  checkpoint_commit_if_needed "$workspace" "ralph: initial commit before loop"
   
   echo ""
   echo "🚀 Starting Ralph loop..."

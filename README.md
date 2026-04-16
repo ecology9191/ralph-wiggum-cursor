@@ -470,11 +470,13 @@ The agent is instructed to commit frequently:
 
 ```bash
 # After each criterion
-git add -A && git commit -m 'ralph: [criterion] - description'
+git add . && git commit -m 'ralph: [criterion] - description'
 
 # Push periodically
 git push
 ```
+
+> **Note:** The agent is instructed to use `git add .` instead of `git add -A` because `git add -A` can fail in repos with incomplete submodule metadata.
 
 **Commits are the agent's memory.** The next iteration picks up from git history.
 

@@ -383,7 +383,16 @@ main() {
     echo ""
     echo "🧪 Running single iteration first..."
     echo ""
-    
+
+    # Create branch if requested (before checkpoint so commit lands on correct branch)
+    if [[ -n "$USE_BRANCH" ]]; then
+      echo "🌿 Creating branch: $USE_BRANCH"
+      git -C "$workspace" checkout -b "$USE_BRANCH" 2>/dev/null || git -C "$workspace" checkout "$USE_BRANCH"
+    fi
+
+    # Commit any uncommitted work (submodule-safe)
+    checkpoint_commit_if_needed "$workspace" "ralph: checkpoint before single iteration"
+
     # Run just one iteration
     local signal
     signal=$(run_iteration "$workspace" "1" "" "$SCRIPT_DIR")

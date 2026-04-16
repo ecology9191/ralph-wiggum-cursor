@@ -150,13 +150,8 @@ main() {
     exit 0
   fi
   
-  # Commit any uncommitted work first
-  cd "$WORKSPACE"
-  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    echo "📦 Committing uncommitted changes..."
-    git add -A
-    git commit -m "ralph: checkpoint before single iteration" || true
-  fi
+  # Commit any uncommitted work (submodule-safe)
+  checkpoint_commit_if_needed "$WORKSPACE" "ralph: checkpoint before single iteration"
   
   echo ""
   echo "🚀 Running single iteration..."
