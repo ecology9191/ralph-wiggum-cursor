@@ -126,10 +126,10 @@ With gum, you get a beautiful interactive menu for selecting models and options:
 
 ```
 ? Select model:
-  ◉ opus-4.5-thinking
-  ◯ sonnet-4.5-thinking
+  ◉ composer-2                        ← list auto-populated from cursor-agent --list-models
+  ◯ claude-4.6-opus-max-thinking
   ◯ gpt-5.2-high
-  ◯ composer-1
+  ◯ claude-4.5-sonnet-thinking
   ◯ Custom...
 
 ? Max iterations: 20
@@ -225,7 +225,7 @@ cat .ralph/errors.log
 
 Options:
   -n, --iterations N     Max iterations (default: 20)
-  -m, --model MODEL      Model to use (default: opus-4.5-thinking)
+  -m, --model MODEL      Model to use (default: auto-detected via cursor-agent)
   --branch NAME          Sequential: create/work on branch; Parallel: integration branch name
   --pr                   Sequential: open PR (requires --branch); Parallel: open ONE integration PR (branch optional)
   --parallel             Run tasks in parallel with worktrees
@@ -241,7 +241,7 @@ Options:
 ./ralph-loop.sh --branch feature/api --pr -y
 
 # Use a different model with more iterations
-./ralph-loop.sh -n 50 -m gpt-5.2-high
+./ralph-loop.sh -n 50 -m composer-2
 
 # Run 4 agents in parallel
 ./ralph-loop.sh --parallel --max-parallel 4
@@ -578,10 +578,10 @@ Configuration is set via command-line flags or environment variables:
 
 ```bash
 # Via flags (recommended)
-./ralph-loop.sh -n 50 -m gpt-5.2-high
+./ralph-loop.sh -n 50 -m composer-2
 
 # Via environment
-RALPH_MODEL=gpt-5.2-high MAX_ITERATIONS=50 ./ralph-loop.sh
+RALPH_MODEL=composer-2 MAX_ITERATIONS=50 ./ralph-loop.sh
 ```
 
 Default thresholds in `ralph-common.sh`:

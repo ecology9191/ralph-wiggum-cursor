@@ -30,8 +30,72 @@ ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-80000}"
 # Iteration limits
 MAX_ITERATIONS="${MAX_ITERATIONS:-20}"
 
-# Model selection
-DEFAULT_MODEL="opus-4.5-thinking"
+# Model selection — dynamic discovery from cursor-agent --list-models
+_RALPH_MODELS_CACHE=""
+
+get_available_models() {
+  if [[ -n "$_RALPH_MODELS_CACHE" ]]; then
+    echo "$_RALPH_MODELS_CACHE"
+    return
+  fi
+
+  local raw slugs
+  raw=$(cursor-agent --list-models 2>/dev/null) || {
+    _RALPH_MODELS_CACHE=$(printf '%s\n' "composer-2" "claude-4.6-opus-max-thinking" "gpt-5.2-high" "claude-4.5-sonnet-thinking")
+    echo "$_RALPH_MODELS_CACHE"
+    return
+  }
+
+  slugs=$(echo "$raw" \
+    | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+    | grep ' - ' \
+    | awk -F' - ' '{print $1}' \
+    | sed 's/^[[:space:]]*//' \
+    | grep -v '^$')
+
+  if [[ -z "$slugs" ]]; then
+    _RALPH_MODELS_CACHE=$(printf '%s\n' "composer-2" "claude-4.6-opus-max-thinking" "gpt-5.2-high" "claude-4.5-sonnet-thinking")
+  else
+    _RALPH_MODELS_CACHE="$slugs"
+  fi
+  echo "$_RALPH_MODELS_CACHE"
+}
+
+get_default_model() {
+  local raw default_slug
+  raw=$(cursor-agent --list-models 2>/dev/null) || {
+    echo "composer-2"
+    return
+  }
+
+  default_slug=$(echo "$raw" \
+    | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+    | grep '(default)' \
+    | awk -F' - ' '{print $1}' \
+    | sed 's/^[[:space:]]*//' \
+    | head -1)
+
+  if [[ -n "$default_slug" ]]; then
+    echo "$default_slug"
+  else
+    get_available_models | head -1
+  fi
+}
+
+validate_model() {
+  local model="$1"
+  local available
+  available=$(get_available_models)
+
+  if echo "$available" | grep -qxF "$model"; then
+    return 0
+  else
+    echo "⚠️  Model '$model' not found in available models. It may still work if it's a private/custom model." >&2
+    return 1
+  fi
+}
+
+DEFAULT_MODEL="$(get_default_model 2>/dev/null || echo 'composer-2')"
 MODEL="${RALPH_MODEL:-$DEFAULT_MODEL}"
 
 # Feature flags (set by caller)
@@ -505,8 +569,13 @@ run_iteration() {
   # Log session start to progress.md
   log_progress "$workspace" "**Session $iteration started** (model: $MODEL)"
   
+  # Soft-validate the model (warn but don't block)
+  if ! validate_model "$MODEL" 2>/dev/null; then
+    echo "⚠️  Model '$MODEL' may not be valid. Continuing anyway." >&2
+  fi
+
   # Build cursor-agent command
-  local cmd="cursor-agent -p --force --output-format stream-json --model $MODEL"
+  local cmd="cursor-agent -p --force --output-format stream-json --model \"$MODEL\""
   
   if [[ -n "$session_id" ]]; then
     echo "Resuming session: $session_id" >&2

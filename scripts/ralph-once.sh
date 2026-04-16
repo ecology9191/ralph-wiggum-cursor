@@ -7,7 +7,7 @@
 # Usage:
 #   ./ralph-once.sh                    # Run single iteration
 #   ./ralph-once.sh /path/to/project   # Run in specific project
-#   ./ralph-once.sh -m gpt-5.2-high    # Use specific model
+#   ./ralph-once.sh -m composer-2       # Use specific model
 #
 # After running:
 #   - Review the changes made
@@ -41,12 +41,12 @@ Usage:
   ./ralph-once.sh [options] [workspace]
 
 Options:
-  -m, --model MODEL      Model to use (default: opus-4.5-thinking)
+  -m, --model MODEL      Model to use (default: auto-detected via cursor-agent)
   -h, --help             Show this help
 
 Examples:
   ./ralph-once.sh                        # Run one iteration
-  ./ralph-once.sh -m sonnet-4.5-thinking # Use Sonnet model
+  ./ralph-once.sh -m composer-2           # Use specific model
   
 After reviewing the results:
   - If satisfied: run ./ralph-setup.sh for full loop

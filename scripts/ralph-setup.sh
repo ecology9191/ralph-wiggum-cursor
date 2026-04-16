@@ -40,14 +40,12 @@ fi
 # GUM UI HELPERS
 # =============================================================================
 
-# Model options
-MODELS=(
-  "opus-4.5-thinking"
-  "sonnet-4.5-thinking"
-  "gpt-5.2-high"
-  "composer-1"
-  "Custom..."
-)
+# Model options (dynamically discovered from cursor-agent)
+mapfile -t MODELS < <(get_available_models)
+if [[ ${#MODELS[@]} -eq 0 ]]; then
+  MODELS=("composer-2")
+fi
+MODELS+=("Custom...")
 
 # Select model using gum or fallback
 select_model() {
