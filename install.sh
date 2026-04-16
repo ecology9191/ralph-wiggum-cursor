@@ -250,15 +250,17 @@ fi
 # =============================================================================
 
 if [[ -f ".gitignore" ]]; then
-  if ! grep -q "ralph-config.json" .gitignore 2>/dev/null; then
+  if ! grep -q "ralph-worktrees" .gitignore 2>/dev/null; then
     echo "" >> .gitignore
-    echo "# Ralph config (may contain API key)" >> .gitignore
-    echo ".cursor/ralph-config.json" >> .gitignore
+    echo "# Ralph temporary artifacts" >> .gitignore
+    echo ".ralph-worktrees/" >> .gitignore
+    echo ".ralph-task-cache.yaml" >> .gitignore
   fi
 else
   cat > .gitignore <<'EOF'
-# Ralph config (may contain API key)
-.cursor/ralph-config.json
+# Ralph temporary artifacts
+.ralph-worktrees/
+.ralph-task-cache.yaml
 EOF
 fi
 echo "✓ Updated .gitignore"

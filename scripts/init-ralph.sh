@@ -160,16 +160,18 @@ echo "✓ Scripts installed to .cursor/ralph-scripts/"
 
 if [[ -f ".gitignore" ]]; then
   # Don't gitignore .ralph/ - we want it tracked for state persistence
-  if ! grep -q "ralph-config.json" .gitignore; then
+  if ! grep -q "ralph-worktrees" .gitignore; then
     echo "" >> .gitignore
-    echo "# Ralph config (may contain API keys)" >> .gitignore
-    echo ".cursor/ralph-config.json" >> .gitignore
+    echo "# Ralph temporary artifacts" >> .gitignore
+    echo ".ralph-worktrees/" >> .gitignore
+    echo ".ralph-task-cache.yaml" >> .gitignore
   fi
   echo "✓ Updated .gitignore"
 else
   cat > .gitignore << 'EOF'
-# Ralph config (may contain API keys)
-.cursor/ralph-config.json
+# Ralph temporary artifacts
+.ralph-worktrees/
+.ralph-task-cache.yaml
 EOF
   echo "✓ Created .gitignore"
 fi
