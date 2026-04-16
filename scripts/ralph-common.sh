@@ -23,12 +23,8 @@ fi
 # CONFIGURATION (can be overridden before sourcing)
 # =============================================================================
 
-# Token thresholds
-export WARN_THRESHOLD="${WARN_THRESHOLD:-70000}"
-export ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-80000}"
-
-# Iteration limits
-export MAX_ITERATIONS="${MAX_ITERATIONS:-20}"
+# Resolved by resolve_ralph_runtime_config() after DEFAULT_MODEL is set.
+# Callers (ralph-setup.sh) handle exports.
 
 # Model selection — dynamic discovery from cursor-agent --list-models
 _RALPH_MODELS_CACHE=""
@@ -95,8 +91,27 @@ validate_model() {
   fi
 }
 
+model_value_invalid_reason() {
+  local val="$1"
+  [[ -z "$val" ]] && echo "empty" && return
+  [[ "$val" == *$'\n'* ]] || [[ "$val" == *$'\r'* ]] && echo "contains newline" && return
+  [[ "$val" =~ [[:space:]] ]] && echo "contains whitespace" && return
+  [[ "$val" == *"Select model"* ]] || [[ "$val" == *"Keep current"* ]] && echo "contains menu text" && return
+  [[ ! "$val" =~ ^[a-zA-Z0-9._-]+$ ]] && echo "invalid characters for CLI model ID" && return
+  echo ""
+}
+
 DEFAULT_MODEL="$(get_default_model 2>/dev/null || echo 'composer-2')"
-MODEL="${RALPH_MODEL:-$DEFAULT_MODEL}"
+
+resolve_ralph_runtime_config() {
+  WARN_THRESHOLD="${WARN_THRESHOLD:-70000}"
+  ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-80000}"
+  MAX_ITERATIONS="${MAX_ITERATIONS:-20}"
+  APPROVE_MCPS="${APPROVE_MCPS:-${RALPH_APPROVE_MCPS:-true}}"
+  MODEL="${MODEL:-${RALPH_MODEL:-$DEFAULT_MODEL}}"
+}
+
+resolve_ralph_runtime_config
 
 # Feature flags (set by caller)
 USE_BRANCH="${USE_BRANCH:-}"
@@ -112,6 +127,25 @@ SCRIPT_DIR="${SCRIPT_DIR:-$(dirname "${BASH_SOURCE[0]}")}"
 if [[ -f "$SCRIPT_DIR/ralph-retry.sh" ]]; then
   source "$SCRIPT_DIR/ralph-retry.sh"
 fi
+
+# Classify pipeline error strings as retryable (DEFER) or fatal (GUTTER).
+# Mirrors is_retryable_api_error from stream-parser.sh but works on raw
+# error text captured from pipeline failures (no structured JSON available).
+is_retryable_runtime_error() {
+  local error_msg="$1"
+  local lower_msg
+  lower_msg=$(echo "$error_msg" | tr '[:upper:]' '[:lower:]')
+
+  if [[ "$lower_msg" =~ (rate[[:space:]]*limit|rate_limit|rate-limit) ]] || \
+     [[ "$lower_msg" =~ (quota[[:space:]]*exceeded|too[[:space:]]*many[[:space:]]*requests|429) ]] || \
+     [[ "$lower_msg" =~ (timeout|timed[[:space:]]*out|connection[[:space:]]*timeout) ]] || \
+     [[ "$lower_msg" =~ (network[[:space:]]*error|connection[[:space:]]*refused|econnreset) ]] || \
+     [[ "$lower_msg" =~ (service[[:space:]]*unavailable|503|bad[[:space:]]*gateway|502) ]] || \
+     [[ "$lower_msg" =~ (gateway[[:space:]]*timeout|504|overloaded|try[[:space:]]*again) ]]; then
+    return 0
+  fi
+  return 1
+}
 
 # =============================================================================
 # BASIC HELPERS
@@ -521,6 +555,38 @@ EOF
 }
 
 # =============================================================================
+# PROCESS LIFECYCLE
+# =============================================================================
+
+stop_process_tree() {
+  local pid="$1"
+  local children
+  children=$(pgrep -P "$pid" 2>/dev/null) || true
+  for child in $children; do
+    stop_process_tree "$child"
+  done
+  kill "$pid" 2>/dev/null || true
+}
+
+# Globals set by run_iteration(), used by the interrupt handler.
+_RALPH_AGENT_PID=""
+_RALPH_SPINNER_PID=""
+
+cleanup_iteration_processes() {
+  [[ -n "$_RALPH_AGENT_PID" ]] && stop_process_tree "$_RALPH_AGENT_PID"
+  [[ -n "$_RALPH_SPINNER_PID" ]] && stop_process_tree "$_RALPH_SPINNER_PID"
+  _RALPH_AGENT_PID=""
+  _RALPH_SPINNER_PID=""
+}
+
+on_iteration_interrupt() {
+  echo "" >&2
+  echo "🛑 Interrupt received — cleaning up agent processes..." >&2
+  cleanup_iteration_processes
+  exit 130
+}
+
+# =============================================================================
 # SPINNER
 # =============================================================================
 
@@ -541,20 +607,22 @@ spinner() {
 # =============================================================================
 
 # Run a single agent iteration
-# Returns: signal (ROTATE, GUTTER, COMPLETE, or empty)
+# Returns: signal (ROTATE, GUTTER, COMPLETE, CONFIG_ERROR, or empty)
 run_iteration() {
   local workspace="$1"
   local iteration="$2"
   local session_id="${3:-}"
   local script_dir="${4:-$(dirname "${BASH_SOURCE[0]}")}"
-  
-  local prompt=$(build_prompt "$workspace" "$iteration")
+
+  local prompt
+  prompt=$(build_prompt "$workspace" "$iteration")
   local fifo="$workspace/.ralph/.parser_fifo"
-  
+  local pipeline_status_file="$workspace/.ralph/.pipeline_status"
+
   # Create named pipe for parser signals
   rm -f "$fifo"
   mkfifo "$fifo"
-  
+
   # Use stderr for display (stdout is captured for signal)
   echo "" >&2
   echo "═══════════════════════════════════════════════════════════════════" >&2
@@ -565,100 +633,133 @@ run_iteration() {
   echo "Model:     $MODEL" >&2
   echo "Monitor:   tail -f $workspace/.ralph/activity.log" >&2
   echo "" >&2
-  
+
   # Log session start to progress.md
   log_progress "$workspace" "**Session $iteration started** (model: $MODEL)"
-  
-  # Validate the model -- hard-fail unless RALPH_FORCE_MODEL=true
+
+  # --- Structural model validation (first gate) ---
+  local bad_reason
+  bad_reason=$(model_value_invalid_reason "$MODEL")
+  if [[ -n "$bad_reason" ]]; then
+    echo "ERROR: Model value is invalid ($bad_reason): '$MODEL'" >&2
+    echo "CONFIG_ERROR"
+    return 1
+  fi
+
+  # --- Semantic model validation (second gate, bypassable) ---
   if ! validate_model "$MODEL" 2>/dev/null; then
     if [[ "${RALPH_FORCE_MODEL:-}" == "true" ]]; then
-      echo "⚠️  Model '$MODEL' not recognized but RALPH_FORCE_MODEL=true, continuing." >&2
+      echo "Warning: Model '$MODEL' not in known list but RALPH_FORCE_MODEL=true." >&2
     else
-      echo "ERROR: Model '$MODEL' is not available." >&2
-      echo "Available models:" >&2
+      echo "ERROR: Model '$MODEL' not available. Set RALPH_FORCE_MODEL=true to override." >&2
       get_available_models >&2
-      echo "" >&2
-      echo "Set RALPH_FORCE_MODEL=true to override." >&2
-      echo "INVALID_MODEL"
+      echo "CONFIG_ERROR"
       return 1
     fi
   fi
 
-  # Write prompt to temp file to avoid eval and special-character issues
-  local prompt_file
-  prompt_file=$(mktemp "${TMPDIR:-/tmp}/ralph-prompt.XXXXXX")
-  echo "$prompt" > "$prompt_file"
-
+  # --- Build command as bash array (no temp files, no eval) ---
+  local -a cmd=(cursor-agent -p --force --output-format stream-json --model "$MODEL")
+  if [[ "$APPROVE_MCPS" == "true" ]]; then
+    cmd+=(--approve-mcps)
+  fi
   if [[ -n "$session_id" ]]; then
+    cmd+=(--resume="$session_id")
     echo "Resuming session: $session_id" >&2
   fi
 
   # Change to workspace
   cd "$workspace"
-  
+
+  # Install trap for clean shutdown
+  trap on_iteration_interrupt HUP INT TERM
+
   # Start spinner to show we're alive
   spinner "$workspace" &
-  local spinner_pid=$!
-  
-  # Start parser in background, reading from cursor-agent
-  # Parser outputs to fifo, we read signals from fifo
+  _RALPH_SPINNER_PID=$!
+
+  # Start pipeline: cursor-agent | stream-parser -> fifo
+  # Pass thresholds as explicit positional args to stream-parser.sh
   (
-    cursor-agent -p --force --output-format stream-json --model "$MODEL" \
-      ${session_id:+--resume="$session_id"} \
-      < "$prompt_file" 2>&1 \
-      | "$script_dir/stream-parser.sh" "$workspace" > "$fifo"
+    "${cmd[@]}" "$prompt" 2>&1 \
+      | "$script_dir/stream-parser.sh" "$workspace" "$WARN_THRESHOLD" "$ROTATE_THRESHOLD" > "$fifo"
+    echo "${PIPESTATUS[*]}" > "$pipeline_status_file"
   ) &
-  local agent_pid=$!
-  
+  _RALPH_AGENT_PID=$!
+
   # Read signals from parser
   local signal=""
   while IFS= read -r line; do
     case "$line" in
       "ROTATE")
-        printf "\r\033[K" >&2  # Clear spinner line
+        printf "\r\033[K" >&2
         echo "🔄 Context rotation triggered - stopping agent..." >&2
-        kill $agent_pid 2>/dev/null || true
+        stop_process_tree "$_RALPH_AGENT_PID"
         signal="ROTATE"
         break
         ;;
       "WARN")
-        printf "\r\033[K" >&2  # Clear spinner line
+        printf "\r\033[K" >&2
         echo "⚠️  Context warning - agent should wrap up soon..." >&2
-        # Send interrupt to encourage wrap-up (agent continues but is notified)
         ;;
       "GUTTER")
-        printf "\r\033[K" >&2  # Clear spinner line
+        printf "\r\033[K" >&2
         echo "🚨 Gutter detected - agent may be stuck..." >&2
         signal="GUTTER"
-        # Don't kill yet, let agent try to recover
         ;;
       "COMPLETE")
-        printf "\r\033[K" >&2  # Clear spinner line
+        printf "\r\033[K" >&2
         echo "✅ Agent signaled completion!" >&2
         signal="COMPLETE"
-        # Let agent finish gracefully
         ;;
       "DEFER")
-        printf "\r\033[K" >&2  # Clear spinner line
+        printf "\r\033[K" >&2
         echo "⏸️  Rate limit or transient error - deferring for retry..." >&2
         signal="DEFER"
-        # Stop the agent, will retry with backoff
-        kill $agent_pid 2>/dev/null || true
+        stop_process_tree "$_RALPH_AGENT_PID"
         ;;
     esac
   done < "$fifo"
-  
-  # Wait for agent to finish
-  wait $agent_pid 2>/dev/null || true
-  
+
+  # Wait for agent pipeline to finish
+  wait "$_RALPH_AGENT_PID" 2>/dev/null || true
+
   # Stop spinner and clear line
-  kill $spinner_pid 2>/dev/null || true
-  wait $spinner_pid 2>/dev/null || true
-  printf "\r\033[K" >&2  # Clear spinner line
-  
-  # Cleanup
-  rm -f "$fifo" "$prompt_file"
-  
+  stop_process_tree "$_RALPH_SPINNER_PID"
+  wait "$_RALPH_SPINNER_PID" 2>/dev/null || true
+  printf "\r\033[K" >&2
+
+  # Clear trap now that processes are down
+  trap - HUP INT TERM
+  _RALPH_AGENT_PID=""
+  _RALPH_SPINNER_PID=""
+
+  # --- PIPESTATUS inference when no signal was emitted ---
+  if [[ -z "$signal" ]] && [[ -f "$pipeline_status_file" ]]; then
+    local pstat
+    pstat=$(cat "$pipeline_status_file" 2>/dev/null || echo "")
+    rm -f "$pipeline_status_file"
+
+    local agent_exit parser_exit
+    agent_exit=$(echo "$pstat" | awk '{print $1}')
+    parser_exit=$(echo "$pstat" | awk '{print $2}')
+
+    if [[ "${agent_exit:-0}" -ne 0 ]] || [[ "${parser_exit:-0}" -ne 0 ]]; then
+      local last_err
+      last_err=$(tail -1 "$workspace/.ralph/errors.log" 2>/dev/null || echo "")
+      if [[ -n "$last_err" ]] && is_retryable_runtime_error "$last_err"; then
+        signal="DEFER"
+      else
+        signal="GUTTER"
+      fi
+    fi
+  else
+    rm -f "$pipeline_status_file"
+  fi
+
+  # Cleanup fifo
+  rm -f "$fifo"
+
   echo "$signal"
 }
 
@@ -787,10 +888,9 @@ run_ralph_loop() {
         echo "   3. Re-run the loop"
         return 1
         ;;
-      "INVALID_MODEL")
-        log_progress "$workspace" "**Loop ended** - 🚨 Invalid model '$MODEL'"
-        echo ""
-        echo "🚨 Model '$MODEL' is not available. Fix RALPH_MODEL or set RALPH_FORCE_MODEL=true."
+      "CONFIG_ERROR")
+        log_progress "$workspace" "**Loop ended** - Configuration error"
+        echo "Fix the configuration error above and re-run." >&2
         return 1
         ;;
       "DEFER")

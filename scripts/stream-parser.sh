@@ -5,7 +5,7 @@
 # Tracks token usage, detects failures/gutter, writes to .ralph/ logs.
 #
 # Usage:
-#   cursor-agent -p --force --output-format stream-json "..." | ./stream-parser.sh /path/to/workspace
+#   cursor-agent ... | ./stream-parser.sh /path/to/workspace [WARN_THRESHOLD] [ROTATE_THRESHOLD]
 #
 # Outputs to stdout:
 #   - ROTATE when threshold hit (80k tokens)
@@ -20,14 +20,17 @@
 set -euo pipefail
 
 WORKSPACE="${1:-.}"
+WARN_THRESHOLD_ARG="${2:-}"
+ROTATE_THRESHOLD_ARG="${3:-}"
+
 RALPH_DIR="$WORKSPACE/.ralph"
 
 # Ensure .ralph directory exists
 mkdir -p "$RALPH_DIR"
 
-# Thresholds
-WARN_THRESHOLD="${WARN_THRESHOLD:-70000}"
-ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-80000}"
+# Triple-layer resolution: positional args > env > defaults
+WARN_THRESHOLD="${WARN_THRESHOLD_ARG:-${WARN_THRESHOLD:-70000}}"
+ROTATE_THRESHOLD="${ROTATE_THRESHOLD_ARG:-${ROTATE_THRESHOLD:-80000}}"
 
 # Tracking state
 BYTES_READ=0
@@ -37,6 +40,7 @@ SHELL_OUTPUT_CHARS=0
 PROMPT_CHARS=0
 TOOL_CALLS=0
 WARN_SENT=0
+NON_JSON_SIGNAL_SENT=0
 
 # Estimate initial prompt size (Ralph prompt is ~2KB + file references)
 PROMPT_CHARS=3000
@@ -205,8 +209,26 @@ process_line() {
   [[ -z "$line" ]] && return
   
   # Parse JSON type
-  local type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null) || return
-  local subtype=$(echo "$line" | jq -r '.subtype // empty' 2>/dev/null) || true
+  local type
+  type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null) || {
+    # Non-JSON line: log and check for actionable patterns
+    local truncated="${line:0:200}"
+    log_error "NON_JSON: $truncated"
+
+    if [[ "$line" =~ (keychain|auth|credential|MCP.*error) ]]; then
+      if [[ "$NON_JSON_SIGNAL_SENT" -eq 0 ]]; then
+        if is_retryable_api_error "$line"; then
+          echo "DEFER" 2>/dev/null || true
+        else
+          echo "GUTTER" 2>/dev/null || true
+        fi
+        NON_JSON_SIGNAL_SENT=1
+      fi
+    fi
+    return
+  }
+  local subtype
+  subtype=$(echo "$line" | jq -r '.subtype // empty' 2>/dev/null) || true
   
   case "$type" in
     "system")

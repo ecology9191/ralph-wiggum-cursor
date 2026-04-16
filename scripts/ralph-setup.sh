@@ -47,52 +47,74 @@ if [[ ${#MODELS[@]} -eq 0 ]]; then
 fi
 MODELS+=("Custom...")
 
-# Select model using gum or fallback
+# Select model using gum or fallback.
+# Accepts the current model as $1; adds "Keep current ($current)" as first option.
+# All interactive text goes to stderr so stdout is clean for capture.
 select_model() {
-  if [[ -n "${RALPH_MODEL:-}" ]]; then
-    echo "$RALPH_MODEL"
-    return
-  fi
+  local current="${1:-$DEFAULT_MODEL}"
+
+  # Build the options list with "Keep current" at the top
+  local -a options=("Keep current ($current)")
+  options+=("${MODELS[@]}")
 
   if [[ "$HAS_GUM" == "true" ]]; then
     local selected
-    selected=$(gum choose --header "Select model:" "${MODELS[@]}")
-    
-    if [[ "$selected" == "Custom..." ]]; then
-      selected=$(gum input --placeholder "Enter model name" --value "$DEFAULT_MODEL")
+    selected=$(gum choose --header "Select model:" "${options[@]}" 2>/dev/tty) || selected="Keep current ($current)"
+
+    if [[ "$selected" == "Keep current ($current)" ]]; then
+      echo "$current"
+      return
     fi
-    echo "$selected"
+
+    if [[ "$selected" == "Custom..." ]]; then
+      selected=$(gum input --placeholder "Enter model name" --value "$current" 2>/dev/tty)
+    fi
   else
-    echo ""
-    echo "Select model:"
+    echo "" >&2
+    echo "Select model:" >&2
     local i=1
-    for m in "${MODELS[@]}"; do
+    for m in "${options[@]}"; do
       if [[ "$m" == "Custom..." ]]; then
-        echo "  $i) Custom (enter manually)"
+        echo "  $i) Custom (enter manually)" >&2
       else
-        echo "  $i) $m"
+        echo "  $i) $m" >&2
       fi
       ((i++))
     done
-    echo ""
-    read -p "Choice [1]: " choice
+    echo "" >&2
+    read -p "Choice [1]: " choice </dev/tty
     choice="${choice:-1}"
-    
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#MODELS[@]} ]]; then
-      local selected="${MODELS[$((choice-1))]}"
-      if [[ "$selected" == "Custom..." ]]; then
-        read -p "Enter model name: " selected
+
+    local selected
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#options[@]} ]]; then
+      selected="${options[$((choice-1))]}"
+      if [[ "$selected" == "Keep current ($current)" ]]; then
+        echo "$current"
+        return
       fi
-      echo "$selected"
+      if [[ "$selected" == "Custom..." ]]; then
+        read -p "Enter model name: " selected </dev/tty
+      fi
     else
-      echo "${MODELS[0]}"
+      selected="$current"
     fi
   fi
+
+  # Structural validation guard
+  local bad_reason
+  bad_reason=$(model_value_invalid_reason "$selected")
+  if [[ -n "$bad_reason" ]]; then
+    echo "Warning: selected model value is invalid ($bad_reason), keeping '$current'" >&2
+    echo "$current"
+    return
+  fi
+
+  echo "$selected"
 }
 
 # Get max iterations using gum or fallback
 get_max_iterations() {
-  local current="${MAX_ITERATIONS:-20}"
+  local current="${1:-${MAX_ITERATIONS:-20}}"
   if [[ "$HAS_GUM" == "true" ]]; then
     local value
     value=$(gum input --header "Max iterations:" --placeholder "$current" --value "$current")
@@ -249,6 +271,9 @@ main() {
     exit 0
   fi
   
+  # Resolve runtime config before interactive selection
+  resolve_ralph_runtime_config
+
   # ==========================================================================
   # INTERACTIVE SETUP
   # ==========================================================================
@@ -261,12 +286,13 @@ main() {
   fi
   echo ""
   
-  # 1. Select model
-  MODEL=$(select_model)
+  # 1. Select model (pass current value for "Keep current" option)
+  MODEL=$(select_model "$MODEL")
+  RALPH_MODEL="$MODEL"
   echo "✓ Model: $MODEL"
   
-  # 2. Max iterations
-  MAX_ITERATIONS=$(get_max_iterations)
+  # 2. Max iterations (pass current value)
+  MAX_ITERATIONS=$(get_max_iterations "$MAX_ITERATIONS")
   echo "✓ Max iterations: $MAX_ITERATIONS"
   
   # 3. Options
@@ -344,7 +370,11 @@ main() {
   
   # Export settings for the loop
   export MODEL
+  export RALPH_MODEL
   export MAX_ITERATIONS
+  export WARN_THRESHOLD
+  export ROTATE_THRESHOLD
+  export APPROVE_MCPS
   export USE_BRANCH
   export OPEN_PR
   
@@ -357,6 +387,11 @@ main() {
     # Run just one iteration
     local signal
     signal=$(run_iteration "$workspace" "1" "" "$SCRIPT_DIR")
+
+    if [[ "$signal" == "CONFIG_ERROR" ]]; then
+      echo "Fix the configuration error above and re-run." >&2
+      exit 1
+    fi
     
     # Check result
     local task_status
@@ -418,6 +453,10 @@ main() {
         "GUTTER")
           log_progress "$workspace" "**Session $iteration ended** - 🚨 GUTTER"
           echo "🚨 Gutter detected. Check .ralph/errors.log"
+          exit 1
+          ;;
+        "CONFIG_ERROR")
+          echo "Fix the configuration error above and re-run." >&2
           exit 1
           ;;
         *)
