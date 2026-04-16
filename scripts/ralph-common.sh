@@ -612,8 +612,11 @@ spinner() {
   local workspace="$1"
   local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
   local i=0
+  local cols msg
   while true; do
-    printf "\r  🐛 Agent working... %s  (watch: tail -f %s/.ralph/activity.log)" "${spin:i++%${#spin}:1}" "$workspace" >&2
+    cols=$(tput cols 2>/dev/null || echo 80)
+    msg="  🐛 Agent working... ${spin:i++%${#spin}:1}  (watch: tail -f ${workspace}/.ralph/activity.log)"
+    printf "\033[2K\r%s" "${msg:0:$cols}" >&2
     sleep 0.1
   done
 }
@@ -696,11 +699,15 @@ run_iteration() {
 
   # Start pipeline: cursor-agent | stream-parser -> fifo
   # Pass thresholds as explicit positional args to stream-parser.sh
+  # Env vars suppress interactive prompts; < /dev/null detaches stdin
   (
+    export CI=1
+    export GIT_TERMINAL_PROMPT=0
+    export GIT_EDITOR=: EDITOR=: PAGER=cat
     "${cmd[@]}" "$prompt" 2>&1 \
       | "$script_dir/stream-parser.sh" "$workspace" "$WARN_THRESHOLD" "$ROTATE_THRESHOLD" > "$fifo"
     echo "${PIPESTATUS[*]}" > "$pipeline_status_file"
-  ) &
+  ) < /dev/null &
   _RALPH_AGENT_PID=$!
 
   # Read signals from parser
@@ -721,18 +728,23 @@ run_iteration() {
       "GUTTER")
         printf "\r\033[K" >&2
         echo "🚨 Gutter detected - agent may be stuck..." >&2
+        stop_process_tree "$_RALPH_AGENT_PID"
         signal="GUTTER"
+        break
         ;;
       "COMPLETE")
         printf "\r\033[K" >&2
         echo "✅ Agent signaled completion!" >&2
+        stop_process_tree "$_RALPH_AGENT_PID"
         signal="COMPLETE"
+        break
         ;;
       "DEFER")
         printf "\r\033[K" >&2
         echo "⏸️  Rate limit or transient error - deferring for retry..." >&2
-        signal="DEFER"
         stop_process_tree "$_RALPH_AGENT_PID"
+        signal="DEFER"
+        break
         ;;
     esac
   done < "$fifo"
