@@ -49,6 +49,11 @@ MODELS+=("Custom...")
 
 # Select model using gum or fallback
 select_model() {
+  if [[ -n "${RALPH_MODEL:-}" ]]; then
+    echo "$RALPH_MODEL"
+    return
+  fi
+
   if [[ "$HAS_GUM" == "true" ]]; then
     local selected
     selected=$(gum choose --header "Select model:" "${MODELS[@]}")
@@ -87,13 +92,14 @@ select_model() {
 
 # Get max iterations using gum or fallback
 get_max_iterations() {
+  local current="${MAX_ITERATIONS:-20}"
   if [[ "$HAS_GUM" == "true" ]]; then
     local value
-    value=$(gum input --header "Max iterations:" --placeholder "20" --value "20")
-    echo "${value:-20}"
+    value=$(gum input --header "Max iterations:" --placeholder "$current" --value "$current")
+    echo "${value:-$current}"
   else
-    read -p "Max iterations [20]: " value
-    echo "${value:-20}"
+    read -p "Max iterations [$current]: " value
+    echo "${value:-$current}"
   fi
 }
 
@@ -325,9 +331,11 @@ main() {
   echo "─────────────────────────────────────────────────────────────────"
   echo ""
   
-  if ! confirm_action "Start Ralph loop?"; then
-    echo "Aborted."
-    exit 0
+  if [[ "${SKIP_CONFIRM:-false}" != "true" ]]; then
+    if ! confirm_action "Start Ralph loop?"; then
+      echo "Aborted."
+      exit 0
+    fi
   fi
   
   # ==========================================================================

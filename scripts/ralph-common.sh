@@ -24,11 +24,11 @@ fi
 # =============================================================================
 
 # Token thresholds
-WARN_THRESHOLD="${WARN_THRESHOLD:-70000}"
-ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-80000}"
+export WARN_THRESHOLD="${WARN_THRESHOLD:-70000}"
+export ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-80000}"
 
 # Iteration limits
-MAX_ITERATIONS="${MAX_ITERATIONS:-20}"
+export MAX_ITERATIONS="${MAX_ITERATIONS:-20}"
 
 # Model selection — dynamic discovery from cursor-agent --list-models
 _RALPH_MODELS_CACHE=""
@@ -569,19 +569,30 @@ run_iteration() {
   # Log session start to progress.md
   log_progress "$workspace" "**Session $iteration started** (model: $MODEL)"
   
-  # Soft-validate the model (warn but don't block)
+  # Validate the model -- hard-fail unless RALPH_FORCE_MODEL=true
   if ! validate_model "$MODEL" 2>/dev/null; then
-    echo "⚠️  Model '$MODEL' may not be valid. Continuing anyway." >&2
+    if [[ "${RALPH_FORCE_MODEL:-}" == "true" ]]; then
+      echo "⚠️  Model '$MODEL' not recognized but RALPH_FORCE_MODEL=true, continuing." >&2
+    else
+      echo "ERROR: Model '$MODEL' is not available." >&2
+      echo "Available models:" >&2
+      get_available_models >&2
+      echo "" >&2
+      echo "Set RALPH_FORCE_MODEL=true to override." >&2
+      echo "INVALID_MODEL"
+      return 1
+    fi
   fi
 
-  # Build cursor-agent command
-  local cmd="cursor-agent -p --force --output-format stream-json --model \"$MODEL\""
-  
+  # Write prompt to temp file to avoid eval and special-character issues
+  local prompt_file
+  prompt_file=$(mktemp "${TMPDIR:-/tmp}/ralph-prompt.XXXXXX")
+  echo "$prompt" > "$prompt_file"
+
   if [[ -n "$session_id" ]]; then
     echo "Resuming session: $session_id" >&2
-    cmd="$cmd --resume=\"$session_id\""
   fi
-  
+
   # Change to workspace
   cd "$workspace"
   
@@ -592,7 +603,10 @@ run_iteration() {
   # Start parser in background, reading from cursor-agent
   # Parser outputs to fifo, we read signals from fifo
   (
-    eval "$cmd \"$prompt\"" 2>&1 | "$script_dir/stream-parser.sh" "$workspace" > "$fifo"
+    cursor-agent -p --force --output-format stream-json --model "$MODEL" \
+      ${session_id:+--resume="$session_id"} \
+      < "$prompt_file" 2>&1 \
+      | "$script_dir/stream-parser.sh" "$workspace" > "$fifo"
   ) &
   local agent_pid=$!
   
@@ -643,7 +657,7 @@ run_iteration() {
   printf "\r\033[K" >&2  # Clear spinner line
   
   # Cleanup
-  rm -f "$fifo"
+  rm -f "$fifo" "$prompt_file"
   
   echo "$signal"
 }
@@ -680,8 +694,13 @@ run_ralph_loop() {
   # Main loop
   local iteration=1
   local session_id=""
+  local noop_count=0
   
   while [[ $iteration -le $MAX_ITERATIONS ]]; do
+    # Capture HEAD before iteration for no-op detection
+    local pre_iteration_sha
+    pre_iteration_sha=$(git -C "$workspace" rev-parse HEAD 2>/dev/null || echo "")
+
     # Run iteration
     local signal
     signal=$(run_iteration "$workspace" "$iteration" "$session_id" "$script_dir")
@@ -768,6 +787,12 @@ run_ralph_loop() {
         echo "   3. Re-run the loop"
         return 1
         ;;
+      "INVALID_MODEL")
+        log_progress "$workspace" "**Loop ended** - 🚨 Invalid model '$MODEL'"
+        echo ""
+        echo "🚨 Model '$MODEL' is not available. Fix RALPH_MODEL or set RALPH_FORCE_MODEL=true."
+        return 1
+        ;;
       "DEFER")
         # Rate limit or transient error - wait with exponential backoff then retry
         log_progress "$workspace" "**Session $iteration ended** - ⏸️ DEFERRED (rate limit/transient error)"
@@ -795,6 +820,25 @@ run_ralph_loop() {
           log_progress "$workspace" "**Session $iteration ended** - Agent finished naturally ($remaining_count criteria remaining)"
           echo ""
           echo "📋 Agent finished but $remaining_count criteria remaining."
+
+          # No-op detection: check whether any commits were produced
+          if [[ -n "$pre_iteration_sha" ]]; then
+            local commits_this_iteration
+            commits_this_iteration=$(git -C "$workspace" rev-list --count HEAD ^"${pre_iteration_sha}" 2>/dev/null || echo "0")
+
+            if [[ "$commits_this_iteration" -eq 0 ]]; then
+              noop_count=$((noop_count + 1))
+              echo "⚠️  Iteration $iteration produced no commits (${noop_count} consecutive no-ops)." >&2
+              if [[ $noop_count -ge 3 ]]; then
+                log_progress "$workspace" "**Loop ended** - 🚨 ${noop_count} consecutive no-op iterations"
+                echo "ERROR: ${noop_count} consecutive iterations produced no work. Aborting." >&2
+                return 1
+              fi
+            else
+              noop_count=0
+            fi
+          fi
+
           echo "   Starting next iteration..."
           iteration=$((iteration + 1))
         fi

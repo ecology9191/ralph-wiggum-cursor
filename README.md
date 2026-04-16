@@ -584,13 +584,16 @@ Configuration is set via command-line flags or environment variables:
 RALPH_MODEL=composer-2 MAX_ITERATIONS=50 ./ralph-loop.sh
 ```
 
-Default thresholds in `ralph-common.sh`:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RALPH_MODEL` | auto-detected | Model slug for `cursor-agent`. Skips the interactive model prompt when set. |
+| `MAX_ITERATIONS` | `20` | Max rotations before giving up |
+| `WARN_THRESHOLD` | `70000` | Token count at which the agent receives a wrap-up warning |
+| `ROTATE_THRESHOLD` | `80000` | Token count at which context is force-rotated |
+| `RALPH_FORCE_MODEL` | unset | Set to `true` to bypass model validation (use when the model is valid but not in `cursor-agent --list-models`) |
+| `SKIP_CONFIRM` | `false` | Set to `true` to skip the "Start Ralph loop?" confirmation in `ralph-setup.sh` |
 
-```bash
-MAX_ITERATIONS=20       # Max rotations before giving up
-WARN_THRESHOLD=70000    # Tokens: send wrapup warning
-ROTATE_THRESHOLD=80000  # Tokens: force rotation
-```
+All threshold and iteration variables are exported to child processes (e.g. `stream-parser.sh`), so overrides set in the parent shell take effect everywhere.
 
 ## Troubleshooting
 
@@ -611,6 +614,18 @@ Check `.ralph/errors.log` for the pattern. Either:
 The agent might be reading too many large files. Check `activity.log` for large READs and consider:
 1. Adding a guardrail: "Don't read the entire file, use grep to find relevant sections"
 2. Breaking the task into smaller pieces
+
+### Loop exits with "Model is not available"
+
+The model name doesn't match any slug from `cursor-agent --list-models`. Either fix the name or bypass validation:
+
+```bash
+RALPH_FORCE_MODEL=true RALPH_MODEL=my-custom-model ./ralph-loop.sh
+```
+
+### Loop exits with "consecutive no-op iterations"
+
+Three consecutive iterations produced no git commits. This usually means the agent is running but not making progress. Check `.ralph/activity.log` and `.ralph/errors.log` for clues, then fix the blocking issue and re-run.
 
 ### Task never completes
 

@@ -4,3 +4,18 @@
 
 # Task cache
 .ralph-task-cache.yaml
+
+# Test artifacts & coverage
+coverage/
+.nyc_output/
+htmlcov/
+test-results/
+junit.xml
+*.lcov
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
